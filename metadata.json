@@ -1,0 +1,6 @@
+{
+  "name": "Smart Resume Analyzer",
+  "description": "AI-powered tool to analyze resumes against job descriptions using Gemini 3 Flash.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI Analysis", "Resume ATS Optimization"]
+}
