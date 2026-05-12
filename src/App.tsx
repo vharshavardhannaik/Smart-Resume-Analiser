@@ -371,11 +371,15 @@ export default function App() {
     setResults(null);
 
     try {
+      // Use local analysis if no API key available
       if (!ai) {
-        setResults(analyzeLocally(resume, jobDescription));
+        const localResult = analyzeLocally(resume, jobDescription);
+        setResults(localResult);
+        setIsAnalyzing(false);
         return;
       }
 
+      // Try Gemini first, fallback to local analysis on error
       try {
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
@@ -443,15 +447,23 @@ object. Ensure high accuracy in alignment scoring.`,
         if (!text) throw new Error("No response from AI.");
         const data = JSON.parse(text);
         setResults(data);
-      } catch (aiError) {
+        setIsAnalyzing(false);
+      } catch (aiError: any) {
         console.warn('Gemini unavailable, switching to local analysis:', aiError);
-        setResults(analyzeLocally(resume, jobDescription));
+        try {
+          const localResult = analyzeLocally(resume, jobDescription);
+          setResults(localResult);
+          setIsAnalyzing(false);
+        } catch (localError: any) {
+          setError(localError instanceof Error ? localError.message : "Local analysis failed.");
+          setIsAnalyzing(false);
+          console.error("Local Analysis Error:", localError);
+        }
       }
     } catch (err: any) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
-      console.error("AI Analysis Error:", err);
-    } finally {
+      setError(err instanceof Error ? err.message : "Something went wrong during analysis.");
       setIsAnalyzing(false);
+      console.error("Analysis Error:", err);
     }
   };
 
