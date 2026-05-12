@@ -12,8 +12,151 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Initialize Gemini API
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
+
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'you', 'your', 'from', 'that', 'this', 'are', 'our', 'will', 'have',
+  'has', 'was', 'were', 'been', 'into', 'across', 'about', 'their', 'them', 'they', 'can', 'using',
+  'use', 'ability', 'strong', 'skills', 'skill', 'experience', 'work', 'role', 'job', 'position',
+  'candidate', 'required', 'preferred', 'plus', 'must', 'need', 'team', 'teams', 'including', 'etc'
+]);
+
+const tokenize = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s+#.-]/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length >= 2);
+
+const getFrequencies = (text: string): Map<string, number> => {
+  const freq = new Map<string, number>();
+  for (const token of tokenize(text)) {
+    if (STOP_WORDS.has(token)) continue;
+    freq.set(token, (freq.get(token) ?? 0) + 1);
+  }
+  return freq;
+};
+
+const pickTopKeywords = (freq: Map<string, number>, limit: number): string[] =>
+  [...freq.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([token]) => token)
+    .slice(0, limit);
+
+const clamp = (value: number, min = 0, max = 100): number => Math.min(max, Math.max(min, value));
+
+const toTitle = (word: string): string => {
+  if (word === 'aws' || word === 'gcp' || word === 'api' || word === 'sql') return word.toUpperCase();
+  if (word.includes('#') || word.includes('+') || word.includes('.')) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1);
+};
+
+const detectYears = (text: string): number => {
+  const matches = text.match(/\b(\d{1,2})\+?\s*(?:years?|yrs?)\b/gi) ?? [];
+  return matches.reduce((max, match) => {
+    const num = Number((match.match(/\d+/) ?? ['0'])[0]);
+    return Number.isFinite(num) ? Math.max(max, num) : max;
+  }, 0);
+};
+
+const analyzeLocally = (resume: string, jobDescription: string): AnalysisResults => {
+  const resumeFreq = getFrequencies(resume);
+  const jdFreq = getFrequencies(jobDescription);
+  const topRequirements = pickTopKeywords(jdFreq, 24);
+  const presentSkills = topRequirements.filter(word => resumeFreq.has(word));
+  const missingRaw = topRequirements.filter(word => !resumeFreq.has(word)).slice(0, 10);
+
+  const keywordMatch = clamp(Math.round((presentSkills.length / Math.max(topRequirements.length, 1)) * 100));
+  const skillsMatch = keywordMatch;
+
+  const resumeYears = detectYears(resume);
+  const jdYears = detectYears(jobDescription);
+  const experienceMatch = jdYears > 0
+    ? clamp(Math.round((Math.min(resumeYears, jdYears) / jdYears) * 100))
+    : clamp(55 + Math.min(resumeYears * 6, 35));
+
+  const jdNeedsEducation = /(bachelor|master|degree|b\.tech|m\.tech|bsc|msc|phd|university|college)/i.test(jobDescription);
+  const resumeHasEducation = /(bachelor|master|degree|b\.tech|m\.tech|bsc|msc|phd|university|college)/i.test(resume);
+  const educationMatch = jdNeedsEducation ? (resumeHasEducation ? 78 : 35) : 70;
+
+  const matchScore = clamp(Math.round(
+    skillsMatch * 0.35 + experienceMatch * 0.30 + educationMatch * 0.15 + keywordMatch * 0.20
+  ));
+
+  const missingSkills: MissingSkill[] = missingRaw.map((word, idx) => ({
+    skill: toTitle(word),
+    priority: idx < 3 ? 'high' : idx < 7 ? 'medium' : 'low',
+    reason: `Mention ${toTitle(word)} more explicitly in projects, responsibilities, or outcomes.`
+  }));
+
+  const strengths: string[] = [
+    `Matched ${presentSkills.length} of the top ${topRequirements.length} requirement keywords.`,
+    resumeYears > 0 ? `Resume indicates up to ${resumeYears} years of experience.` : 'Resume includes role-focused technical language.',
+    resumeHasEducation ? 'Education section detected with degree-level indicators.' : 'Profile emphasizes practical and project-oriented contribution.'
+  ];
+
+  const improvements: Improvement[] = [];
+  if (!/(summary|objective|profile)/i.test(resume)) {
+    improvements.push({
+      section: 'Summary',
+      issue: 'No clear professional summary detected at the top of the resume.',
+      fix: 'Add a 3-4 line summary with target role, core stack, years of experience, and measurable impact.'
+    });
+  }
+  if (!/(projects?|experience|internship|employment)/i.test(resume)) {
+    improvements.push({
+      section: 'Experience',
+      issue: 'Experience/projects section is not clearly labeled for ATS parsing.',
+      fix: 'Create a dedicated Experience/Projects section with role, company, dates, and 3-5 quantified bullet points.'
+    });
+  }
+  if (missingSkills.length > 0) {
+    improvements.push({
+      section: 'Keywords',
+      issue: 'Important job-specific keywords are missing or underrepresented.',
+      fix: `Integrate these terms naturally: ${missingSkills.slice(0, 5).map(s => s.skill).join(', ')}.`
+    });
+  }
+  if (resume.length < 1200) {
+    improvements.push({
+      section: 'Depth',
+      issue: 'Resume may be too brief for strong ATS matching on technical roles.',
+      fix: 'Expand major projects with tools used, business impact, and clear result metrics (%, time saved, scale handled).' 
+    });
+  }
+
+  const keywordsToAdd = missingSkills.map(skill => skill.skill).slice(0, 8);
+  const atsSignals = ['summary', 'experience', 'education', 'skills', 'projects'];
+  const atsHit = atsSignals.filter(signal => new RegExp(signal, 'i').test(resume)).length;
+  const atsCompatibility = clamp(Math.round((atsHit / atsSignals.length) * 100) + Math.round(keywordMatch * 0.25));
+
+  const hireProbability: AnalysisResults['hireProbability'] = matchScore >= 75 ? 'high' : matchScore >= 50 ? 'medium' : 'low';
+  const overallFeedback =
+    matchScore >= 75
+      ? 'Strong alignment with the target role. Focus on polishing quantified impact and role-specific keywords.'
+      : matchScore >= 50
+        ? 'Moderate match. Improve keyword alignment and make project outcomes more measurable to raise ATS ranking.'
+        : 'Low-to-moderate match currently. Add missing role keywords, restructure experience bullets, and tailor summary to the job.';
+
+  return {
+    matchScore,
+    scoreBreakdown: {
+      skillsMatch,
+      experienceMatch,
+      educationMatch,
+      keywordMatch
+    },
+    presentSkills: presentSkills.slice(0, 14).map(toTitle),
+    missingSkills,
+    strengths,
+    improvements: improvements.slice(0, 6),
+    keywordsToAdd,
+    overallFeedback,
+    hireProbability,
+    atsCompatibility
+  };
+};
 
 // --- Types ---
 interface MissingSkill {
@@ -160,6 +303,7 @@ export default function App() {
   const [isParsing, setIsParsing] = useState(false);
   const [expandedImprovements, setExpandedImprovements] = useState<Record<number, boolean>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const engineName = ai ? 'GEMINI-3-FLASH' : 'LOCAL_HEURISTIC';
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -227,73 +371,82 @@ export default function App() {
     setResults(null);
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Resume:\n${resume}\n\nJob Description:\n${jobDescription}`,
-        config: {
-          systemInstruction: `You are an expert ATS (Applicant Tracking System) and career coach. 
+      if (!ai) {
+        setResults(analyzeLocally(resume, jobDescription));
+        return;
+      }
+
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: `Resume:\n${resume}\n\nJob Description:\n${jobDescription}`,
+          config: {
+            systemInstruction: `You are an expert ATS (Applicant Tracking System) and career coach. 
 Analyze the resume against the job description and return a detailed JSON 
 object. Ensure high accuracy in alignment scoring.`,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              matchScore: { type: Type.NUMBER },
-              scoreBreakdown: {
-                type: Type.OBJECT,
-                properties: {
-                  skillsMatch: { type: Type.NUMBER },
-                  experienceMatch: { type: Type.NUMBER },
-                  educationMatch: { type: Type.NUMBER },
-                  keywordMatch: { type: Type.NUMBER }
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                matchScore: { type: Type.NUMBER },
+                scoreBreakdown: {
+                  type: Type.OBJECT,
+                  properties: {
+                    skillsMatch: { type: Type.NUMBER },
+                    experienceMatch: { type: Type.NUMBER },
+                    educationMatch: { type: Type.NUMBER },
+                    keywordMatch: { type: Type.NUMBER }
+                  },
+                  required: ["skillsMatch", "experienceMatch", "educationMatch", "keywordMatch"]
                 },
-                required: ["skillsMatch", "experienceMatch", "educationMatch", "keywordMatch"]
+                presentSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+                missingSkills: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      skill: { type: Type.STRING },
+                      priority: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                      reason: { type: Type.STRING }
+                    },
+                    required: ["skill", "priority", "reason"]
+                  }
+                },
+                strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+                improvements: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      section: { type: Type.STRING },
+                      issue: { type: Type.STRING },
+                      fix: { type: Type.STRING }
+                    },
+                    required: ["section", "issue", "fix"]
+                  }
+                },
+                keywordsToAdd: { type: Type.ARRAY, items: { type: Type.STRING } },
+                overallFeedback: { type: Type.STRING },
+                hireProbability: { type: Type.STRING, enum: ['low', 'medium', 'high'] },
+                atsCompatibility: { type: Type.NUMBER }
               },
-              presentSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
-              missingSkills: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    skill: { type: Type.STRING },
-                    priority: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
-                    reason: { type: Type.STRING }
-                  },
-                  required: ["skill", "priority", "reason"]
-                }
-              },
-              strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
-              improvements: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    section: { type: Type.STRING },
-                    issue: { type: Type.STRING },
-                    fix: { type: Type.STRING }
-                  },
-                  required: ["section", "issue", "fix"]
-                }
-              },
-              keywordsToAdd: { type: Type.ARRAY, items: { type: Type.STRING } },
-              overallFeedback: { type: Type.STRING },
-              hireProbability: { type: Type.STRING, enum: ['low', 'medium', 'high'] },
-              atsCompatibility: { type: Type.NUMBER }
-            },
-            required: [
-              "matchScore", "scoreBreakdown", "presentSkills", "missingSkills", 
-              "strengths", "improvements", "keywordsToAdd", "overallFeedback", 
-              "hireProbability", "atsCompatibility"
-            ]
+              required: [
+                "matchScore", "scoreBreakdown", "presentSkills", "missingSkills", 
+                "strengths", "improvements", "keywordsToAdd", "overallFeedback", 
+                "hireProbability", "atsCompatibility"
+              ]
+            }
           }
-        }
-      });
+        });
 
-      const text = response.text;
-      if (!text) throw new Error("No response from AI.");
-      
-      const data = JSON.parse(text);
-      setResults(data);
+        const text = response.text;
+        if (!text) throw new Error("No response from AI.");
+        const data = JSON.parse(text);
+        setResults(data);
+      } catch (aiError) {
+        console.warn('Gemini unavailable, switching to local analysis:', aiError);
+        setResults(analyzeLocally(resume, jobDescription));
+      }
     } catch (err: any) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       console.error("AI Analysis Error:", err);
@@ -334,7 +487,7 @@ object. Ensure high accuracy in alignment scoring.`,
             {!results && !isAnalyzing ? (
               <div className="hidden md:flex flex-col items-end">
                 <p className="font-mono text-[10px] uppercase opacity-50 tracking-widest text-[#e6edf3]">System Engine</p>
-                <p className="font-mono text-sm text-white">GEMINI-3-FLASH</p>
+                <p className="font-mono text-sm text-white">{engineName}</p>
               </div>
             ) : results ? (
               <button 
