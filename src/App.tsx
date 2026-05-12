@@ -467,14 +467,6 @@ object. Ensure high accuracy in alignment scoring.`,
     }
   };
 
-  const copyTips = () => {
-    if (!results) return;
-    const tips = results.improvements.map(imp => 
-      `Section: ${imp.section}\nIssue: ${imp.issue}\nFix: ${imp.fix}\n`
-    ).join('\n---\n\n');
-    navigator.clipboard.writeText(tips);
-  };
-
   const reset = () => {
     setResults(null);
     setError(null);
@@ -778,15 +770,9 @@ object. Ensure high accuracy in alignment scoring.`,
                   <div className="pt-8 flex gap-4 mt-auto">
                     <button 
                       onClick={reset}
-                      className="flex-1 py-4 bg-[#00e5ff] text-black font-black uppercase tracking-tighter text-sm italic hover:scale-[1.02] shadow-[0_0_30px_-10px_rgba(0,229,255,0.5)] transition-all"
+                      className="w-full py-4 bg-[#00e5ff] text-black font-black uppercase tracking-tighter text-sm italic hover:scale-[1.02] shadow-[0_0_30px_-10px_rgba(0,229,255,0.5)] transition-all"
                     >
                       New_Analysis
-                    </button>
-                    <button 
-                      onClick={copyTips}
-                      className="flex-1 py-4 border border-[#30363d] text-white font-black uppercase tracking-tighter text-sm italic hover:bg-white/5 transition-all"
-                    >
-                      Export_Report
                     </button>
                   </div>
                 </div>
